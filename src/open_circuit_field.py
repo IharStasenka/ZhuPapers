@@ -204,15 +204,6 @@ class OpenCircuitField:
         # Backward compatible names (previous code used self.Rm as magnet outer radius)
         self.Rm = self.Rm_out
 
-        # Zhu-style aliases (do not change formulas; adjust variables here):
-        # - Eq.34 uses Rs, Rm (magnet outer), Rr (magnet inner / rotor surface)
-        # - Eq.52 uses Rs, Rm (magnet inner)
-        self.Rs_Zhu = self.Rs
-        self.Rm_Zhu_outer = self.Rm_out
-        self.Rr_Zhu = self.Rm_in
-        self.Rm_Zhu_inner = self.Rm_in
-        self.Rg_in = self.Rm_out  # explicit alias for airgap inner (magnet outer)
-        
         # Relative permeances (for potential future use)
         self.kr = self.geometry.rotor_outer_radius / self.geometry.stator_inner_radius
         self.kg = self.geometry.airgap_length / self.geometry.stator_inner_radius
@@ -299,7 +290,7 @@ class OpenCircuitField:
         g = self.geometry.airgap_length
         Hm = self.magnet.magnet_thickness
         Rm = Rs - g  # Magnet outer = stator inner - airgap (correct: inward from Rs)
-        Rr_coeff = Rm - Hm  # Magnet inner = magnet outer - magnet thickness
+        Rr = self.geometry.rotor_outer_radius  # Magnet inner = magnet outer - magnet thickness
         mur = self.magnet.relative_permeability
         p = self.geometry.pole_pairs
 
@@ -308,22 +299,19 @@ class OpenCircuitField:
             n_p = n * p
             M = magnetization_coeffs[i]
             if i == 0:
-                numerator = (Rm/Rs)**2 - (Rr_coeff/Rs)**2 + (Rr_coeff/Rs)**2 * npy.log((Rm/Rr_coeff)**2)
-                denominator = ((mur+1)/mur)*(1-(Rr_coeff/Rs)**2) - ((mur-1)/mur)*((Rm/Rs)**2 - (Rr_coeff/Rm)**2)
+                numerator = (Rm/Rs)**2 - (Rr/Rs)**2 + (Rr/Rs)**2 * npy.log((Rm/Rr)**2)
+                denominator = ((mur+1)/mur)*(1-(Rr/Rs)**2) - ((mur-1)/mur)*((Rm/Rs)**2 - (Rr/Rm)**2)
                 flux_coeffs[i] = (self.mu0*M/mur) * numerator / denominator
             else:
                 factor1 = 2*(self.mu0*M/mur)
                 factor2 = n_p/(n_p**2 - 1)
                 factor3 = (Rs/Rm)**(n_p+1)
-                numerator = (n_p - 1) + 2*(Rr_coeff/Rm)**(n_p+1) - (n_p + 1)*(Rr_coeff/Rm)**(2*n_p)
-                denominator = ((mur+1)/mur)*(1-(Rr_coeff/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p) - (Rr_coeff/Rm)**(2*n_p))
+                numerator = (n_p - 1) + 2*(Rr/Rm)**(n_p+1) - (n_p + 1)*(Rr/Rm)**(2*n_p)
+                denominator = ((mur+1)/mur)*(1-(Rr/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p) - (Rr/Rm)**(2*n_p))
                 flux_coeffs[i] = factor1 * factor2 * factor3 * numerator / denominator
 
         R, THETA = npy.meshgrid(radius, theta, indexing='ij')
         Br = npy.zeros_like(R)
-
-        # Use physical magnet outer surface as inner bound
-        Rr = self.geometry.rotor_outer_radius
 
         for n, coeff in zip(harmonics, flux_coeffs):
             if coeff != 0:
@@ -368,13 +356,13 @@ class OpenCircuitField:
         flux_coeffs = npy.zeros(len(magnetization_coeffs))
 
         # Geometry with extended outer boundary
-        Rs_inner = self.Rs              # coil inner (legacy Rs)
-        Rs_eff = self.Rs_eff            # coil outer / yoke inner (effective boundary)
+        Rs = self.Rs          # coil outer / yoke inner (effective boundary)
         g = self.g
         Hm = self.Hm
+        r = 0
         # Magnet outer stays at Rs_inner + g (mechanical airgap ends at coil inner)
-        Rm = Rs_inner + g
-        Rr = Rs_inner + g + Hm
+        Rm = Rs - g
+        Rr = Rs - g - Hm
         mur = self.magnet.relative_permeability
         p = self.geometry.pole_pairs
 
@@ -385,15 +373,15 @@ class OpenCircuitField:
             M = magnetization_coeffs[i]
 
             if i == 0:
-                numerator = (Rm/Rs_eff)**2 - (Rr/Rs_eff)**2 + (Rr/Rs_eff)**2 * npy.log((Rm/Rr)**2)
-                denominator = ((mur+1)/mur)*(1-(Rr/Rs_eff)**2) - ((mur-1)/mur)*((Rm/Rs_eff)**2 - (Rr/Rm)**2)
+                numerator = (Rm/Rs)**2 - (Rr/Rs)**2 + (Rr/Rs)**2 * npy.log((Rm/Rr)**2)
+                denominator = ((mur+1)/mur)*(1-(Rr/Rs)**2) - ((mur-1)/mur)*((Rm/Rs)**2 - (Rr/Rm)**2)
                 flux_coeffs[i] = (self.mu0*M/mur) * numerator / denominator
             else:
                 factor1 = 2*(self.mu0*M/mur)
                 factor2 = n_p/(n_p**2-1)
-                factor3 = (Rs_eff/Rm)**(n_p+1)
+                factor3 = (r/Rs)**(n_p - 1)*(Rm/Rs)**(n_p+1) + (Rm/r)**(n_p + 1)
                 numerator = (n_p-1) + 2*(Rr/Rm)**(n_p+1) - (n_p+1)*(Rr/Rm)**(2*n_p)
-                denominator = ((mur+1)/mur)*(1-(Rr/Rs_eff)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs_eff)**(2*n_p)-(Rr/Rm)**(2*n_p))
+                denominator = ((mur+1)/mur)*(1-(Rr/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p)-(Rr/Rm)**(2*n_p))
                 flux_coeffs[i] = factor1 * factor2 * factor3 * numerator / denominator
 
         R, THETA = npy.meshgrid(radius, theta, indexing='ij')
@@ -401,14 +389,79 @@ class OpenCircuitField:
 
         for n, coeff in zip(harmonics, flux_coeffs):
             if coeff != 0:
-                mask = (R >= self.geometry.rotor_outer_radius) & (R <= Rs_eff)
+                mask = (R >= self.geometry.rotor_outer_radius) & (R <= Rs)
                 if npy.any(mask):
-                    r_ratio = R[mask] / Rs_eff
-                    rr_rs_ratio = self.geometry.rotor_outer_radius / Rs_eff
+                    r_ratio = R[mask] / Rs
+                    rr_rs_ratio = self.geometry.rotor_outer_radius / Rs
                     Br_term = ((r_ratio)**(n-1) - (rr_rs_ratio)**(2*n) * (r_ratio)**(-n-1)) / (1 - (rr_rs_ratio)**(2*n))
                     Br += coeff * Br_term * npy.cos(n * THETA)
 
         return Br
+
+
+    def radial_flux_density_in_gap_at_radius(self, r: float, theta: npy.ndarray,
+                                     n_harmonics: int = 20) -> npy.ndarray:
+        """
+
+        Parameters
+        ----------
+        r : float
+            Radial position at which to evaluate (should be within the airgap region).
+        theta : ndarray
+            Angular positions (rad).
+        n_harmonics : int
+            Number of odd harmonics to include.
+
+        Returns
+        -------
+        ndarray
+            Br(r,θ) over requested grid.
+        """
+
+        harmonics, magnetization_coeffs = self.fourier_coefficients(n_harmonics)
+        flux_coeffs = npy.zeros(len(magnetization_coeffs))
+
+        # Geometry with extended outer boundary
+        Rs = self.Rs
+        g = self.g
+        Hm = self.Hm
+        # Magnet outer stays at Rs_inner + g (mechanical airgap ends at coil inner)
+        Rm = Rs - g
+        Rr = Rs - g - Hm
+        mur = self.magnet.relative_permeability
+        p = self.geometry.pole_pairs
+
+        if r < Rm or r > Rs:
+            print ("Requested radius outside airgap region.")
+            # Fall back to original implementation
+            return any
+
+        Br = npy.zeros_like(theta)
+
+        for i in range(len(magnetization_coeffs)):
+            n = 2*i + 1
+            n_p = n * p
+            M = magnetization_coeffs[i]
+
+            # if i == 0:
+            #     numerator = (Rm/Rs)**2 - (Rr/Rs)**2 + (Rr/Rs)**2 * npy.log((Rm/Rr)**2)
+            #     denominator = ((mur+1)/mur)*(1-(Rr/Rs)**2) - ((mur-1)/mur)*((Rm/Rs)**2 - (Rr/Rm)**2)
+            #     flux_coeffs[i] = (self.mu0*M/mur) * numerator / denominator
+            # else:
+            factor1 = (self.mu0*M/mur)
+            factor2 = n_p/(n_p**2-1)
+            factor3 = (r/Rs)**(n_p - 1)*(Rm/Rs)**(n_p+1) + (Rm/r)**(n_p + 1)
+            numerator = (n_p-1) + 2*(Rr/Rm)**(n_p+1) - (n_p+1)*(Rr/Rm)**(2*n_p)
+            denominator = ((mur+1)/mur)*(1-(Rr/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p)-(Rr/Rm)**(2*n_p))
+            flux_coeffs[i] = factor1 * factor2 * factor3 * numerator / denominator
+            print(f"n={n}, Mn={M:.6e}, Bn={flux_coeffs[i]:.6e}")
+
+
+        for n, coeff in zip(harmonics, flux_coeffs):
+            Br += coeff * npy.cos(n * theta)
+
+        return Br
+
 
     def radial_flux_density_in_magnets(self, radius: npy.ndarray, theta: npy.ndarray, 
                                       n_harmonics: int = 20) -> npy.ndarray:
@@ -825,7 +878,7 @@ class OpenCircuitField:
         # Sample Br over 0..2π and project onto the fundamental cos(pθ)
         p = self.geometry.pole_pairs
         theta = np.linspace(0.0, 2.0*np.pi, 2048, endpoint=False)
-        Br = self.radial_flux_density(np.array([radius]), theta, n_harmonics)[0, :]
+        Br = self.radial_flux_density_in_gap_at_radius(radius, theta, n_harmonics)[0, :]
 
         # Fundamental amplitude at this radius using orthogonality:
         # A1 = (1/π) ∫_0^{2π} Br(θ) cos(pθ) dθ

@@ -454,8 +454,6 @@ class OpenCircuitField:
             numerator = (n_p-1) + 2*(Rr/Rm)**(n_p+1) - (n_p+1)*(Rr/Rm)**(2*n_p)
             denominator = ((mur+1)/mur)*(1-(Rr/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p)-(Rr/Rm)**(2*n_p))
             flux_coeffs[i] = factor1 * factor2 * factor3 * numerator / denominator
-            print(f"n={n}, Mn={M:.6e}, Bn={flux_coeffs[i]:.6e}")
-
 
         for n, coeff in zip(harmonics, flux_coeffs):
             Br += coeff * npy.cos(n * theta)
@@ -878,7 +876,7 @@ class OpenCircuitField:
         # Sample Br over 0..2π and project onto the fundamental cos(pθ)
         p = self.geometry.pole_pairs
         theta = np.linspace(0.0, 2.0*np.pi, 2048, endpoint=False)
-        Br = self.radial_flux_density_in_gap_at_radius(radius, theta, n_harmonics)[0, :]
+        Br = self.radial_flux_density_in_gap_at_radius(radius, theta, n_harmonics)
 
         # Fundamental amplitude at this radius using orthogonality:
         # A1 = (1/π) ∫_0^{2π} Br(θ) cos(pθ) dθ

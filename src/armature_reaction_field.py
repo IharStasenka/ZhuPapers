@@ -11,88 +11,9 @@ from typing import Tuple, List, Optional, Dict
 from dataclasses import dataclass
 # Support both absolute and relative imports for notebook vs package usage
 try:
-    from open_circuit_field import MotorGeometry
-except ImportError:
-    from .open_circuit_field import MotorGeometry
-
-
-@dataclass
-class WindingConfiguration:
-    """Stator winding configuration parameters.
-
-    Modernized to support explicit rectangular wire specification for slotless
-    single-layer windings. The winding factor is now auto-computed and no longer
-    required as a user input; it is retained as a derived attribute for checks.
-
-    Inputs
-    ------
-    phases : int
-        Number of phases (typically 3).
-    slots_per_pole_per_phase : float
-        Effective q. For true slotless concentrated windings this can be 1.0.
-    turns_per_coil : int
-        Turns per coil (per phase group in this simplified model).
-    coil_span : float
-        Electrical coil span expressed as fraction of full pole pitch (1.0 = full pitch).
-    current_density : float
-        Conductor current density in A/m² (set to 0 here; swept externally per analysis cell).
-    conductor_area : Optional[float]
-        Direct conductor cross-sectional area in m² (overrides wire_width*wire_height if provided).
-    wire_width : Optional[float]
-        Rectangular wire width (m). If both width & height supplied and conductor_area is None,
-        area is auto-computed.
-    wire_height : Optional[float]
-        Rectangular wire height (m).
-    winding_factor : Optional[float]
-        Optional manual override; if None it is auto-computed (slotless assumption).
-
-    Derived
-    -------
-    - conductor_area (m²)
-    - winding_factor (≈1.0 for slotless full-pitch; coil_span scaling applied)
-    """
-    # Required (non-default) fields first to satisfy dataclass constraints
-    phases: int
-    turns_per_coil: int
-    current_density: float
-
-    # Optional inputs with sensible defaults for slotless windings
-    slots_per_pole_per_phase: Optional[float] = None  # defaults to 1.0 in __post_init__
-    coil_span: Optional[float] = None                 # defaults to 1.0 (full pitch) in __post_init__
-    conductor_area: Optional[float] = None
-    wire_width: Optional[float] = None
-    wire_height: Optional[float] = None
-    winding_factor: Optional[float] = None
-
-    def __post_init__(self):
-        # Default effective q for slotless: 1.0 if not provided
-        if self.slots_per_pole_per_phase is None:
-            self.slots_per_pole_per_phase = 1.0
-
-        # Default full-pitch coil for slotless unless specified
-        if self.coil_span is None:
-            self.coil_span = 1.0
-
-        # Compute conductor area if not explicitly provided
-        if self.conductor_area is None and self.wire_width is not None and self.wire_height is not None:
-            self.conductor_area = self.wire_width * self.wire_height
-        elif self.conductor_area is None:
-            raise ValueError("Either conductor_area or both wire_width and wire_height must be specified.")
-
-        # Auto-compute winding factor if not provided.
-        # For slotless single-layer windings we take kd≈1, kskew≈1 and use pitch factor for the fundamental:
-        #   kw ≈ kp = cos(δ/2), where δ = short-pitch angle = (1 - coil_span) * π (electrical radians)
-        if self.winding_factor is None:
-            span = max(0.0, min(self.coil_span, 1.0))
-            delta = (1.0 - span) * np.pi  # electrical short-pitch angle (rad)
-            self.winding_factor = float(np.cos(0.5 * delta)) if span > 0 else 0.0
-        # Basic sanity checks (kw is a product of factors in [0,1])
-        if not (0.0 <= self.winding_factor <= 1.0):
-            raise ValueError(f"Computed/assigned winding_factor={self.winding_factor} is out of [0,1].")
-
-    def summary(self) -> str:
-        return (f"WindingConfiguration(phases={self.phases}, q={self.slots_per_pole_per_phase}, turns={self.turns_per_coil}, "
-                f"coil_span={self.coil_span:.3f}, kw={self.winding_factor:.3f}, area={self.conductor_area:.3e} m²)")
+    from open_circuit_field import MotorGeometry, WindingConfiguration
+except ImportError: 
+    from .open_circuit_field import MotorGeometry, WindingConfiguration
 
 
 class ArmatureReactionField:

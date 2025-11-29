@@ -45,12 +45,12 @@ class MotorGeometry:
         *,
         stator_outer_diameter: float,
         stator_thickness: float,
-        coil_thickness: float = 0.0,
         airgap_length: float,
         magnet_thickness: float,
         rotor_thickness: float,
         axial_length: float,
         pole_pairs: int,
+        coil_thickness: float = 0.0,
         min_shaft_radius: float = 0.0,
     ) -> "MotorGeometry":
         Rso = stator_outer_diameter / 2.0
@@ -123,6 +123,135 @@ class MagnetProperties:
     coercivity: float               # Hc (A/m)
     magnet_thickness: float         # hm (m)
     magnet_arc_ratio: float         # αm (magnet arc to pole pitch ratio)
+
+
+@dataclass
+class WindingConfiguration:
+    """Stator winding configuration parameters.
+
+    Modernized to support explicit rectangular wire specification for slotless
+    single-layer windings. The winding factor is now auto-computed and no longer
+    required as a user input; it is retained as a derived attribute for checks.
+
+    Inputs
+    ------
+    phases : int
+        Number of phases (typically 3).
+    slots_per_pole_per_phase : float
+        Effective q. For true slotless concentrated windings this can be 1.0.
+    turns_per_coil : int
+        Turns per coil (per phase group in this simplified model).
+    coil_span : float
+        Electrical coil span expressed as fraction of full pole pitch (1.0 = full pitch).
+    parallel_branches : int
+        Number of parallel coils/branches per phase (default: 1). Total phase current 
+        is the sum of currents through all parallel branches.
+    current_density : float
+        Conductor current density in A/m² (set to 0 here; swept externally per analysis cell).
+    conductor_area : Optional[float]
+        Direct conductor cross-sectional area in m² (overrides wire_width*wire_height if provided).
+    wire_width : Optional[float]
+        Rectangular wire width (m). If both width & height supplied and conductor_area is None,
+        area is auto-computed.
+    wire_height : Optional[float]
+        Rectangular wire height (m).
+    winding_factor : Optional[float]
+        Optional manual override; if None it is auto-computed (slotless assumption).
+
+    Derived
+    -------
+    - conductor_area (m²)
+    - winding_factor (≈1.0 for slotless full-pitch; coil_span scaling applied)
+    """
+    # Required (non-default) fields first to satisfy dataclass constraints
+    phases: int
+    turns_per_coil: int
+    current_density: float
+
+    # Optional inputs with sensible defaults for slotless windings
+    slots_per_pole_per_phase: Optional[float] = None  # defaults to 1.0 in __post_init__
+    coil_span: Optional[float] = None                 # defaults to 1.0 (full pitch) in __post_init__
+    parallel_branches: int = 1                        # number of parallel coils/branches per phase (default: 1)
+    conductor_area: Optional[float] = None
+    wire_width: Optional[float] = None
+    wire_height: Optional[float] = None
+    winding_factor: Optional[float] = None
+
+    def __post_init__(self):
+        # Default effective q for slotless: 1.0 if not provided
+        if self.slots_per_pole_per_phase is None:
+            self.slots_per_pole_per_phase = 1.0
+
+        # Default full-pitch coil for slotless unless specified
+        if self.coil_span is None:
+            self.coil_span = 1.0
+
+        # Compute conductor area if not explicitly provided
+        if self.conductor_area is None and self.wire_width is not None and self.wire_height is not None:
+            self.conductor_area = self.wire_width * self.wire_height
+        elif self.conductor_area is None:
+            raise ValueError("Either conductor_area or both wire_width and wire_height must be specified.")
+
+        # Auto-compute winding factor if not provided.
+        # For slotless single-layer windings we take kd≈1, kskew≈1 and use pitch factor for the fundamental:
+        #   kw ≈ kp = cos(δ/2), where δ = short-pitch angle = (1 - coil_span) * π (electrical radians)
+        if self.winding_factor is None:
+            span = max(0.0, min(self.coil_span, 1.0))
+            delta = (1.0 - span) * npy.pi  # electrical short-pitch angle (rad)
+            self.winding_factor = float(npy.cos(0.5 * delta)) if span > 0 else 0.0
+        # Basic sanity checks (kw is a product of factors in [0,1])
+        if not (0.0 <= self.winding_factor <= 1.0):
+            raise ValueError(f"Computed/assigned winding_factor={self.winding_factor} is out of [0,1].")
+
+    def summary(self) -> str:
+        return (f"WindingConfiguration(phases={self.phases}, q={self.slots_per_pole_per_phase}, turns={self.turns_per_coil}, "
+                f"coil_span={self.coil_span:.3f}, kw={self.winding_factor:.3f}, area={self.conductor_area:.3e} m²)")
+    
+    def current_per_branch(self, current_density: float) -> float:
+        """
+        Calculate current per parallel branch from current density.
+        
+        Parameters
+        ----------
+        current_density : float
+            Current density in A/mm²
+            
+        Returns
+        -------
+        float
+            Current per branch in Amperes
+        """
+        # Convert A/mm² to A/m² by multiplying by 1e6
+        current_density_m2 = current_density * 1e6
+        return current_density_m2 * self.conductor_area
+    
+    def phase_current(self, current_density: float) -> float:
+        """
+        Calculate total phase current from current density, accounting for parallel branches.
+        
+        For parallel branches, the total phase current is the sum of currents through
+        all parallel paths (not the current per branch).
+        
+        Parameters
+        ----------
+        current_density : float
+            Current density in A/mm²
+            
+        Returns
+        -------
+        float
+            Total phase current in Amperes
+            
+        Examples
+        --------
+        >>> winding = WindingConfiguration(phases=3, turns_per_coil=13, 
+        ...                                parallel_branches=2,
+        ...                                wire_width=1e-3, wire_height=2.5e-3,
+        ...                                current_density=0)
+        >>> J = 35.0  # A/mm²
+        >>> I_phase = winding.phase_current(J)
+        """
+        return self.current_per_branch(current_density) * self.parallel_branches
 
 
 class OpenCircuitField:
@@ -442,12 +571,6 @@ class OpenCircuitField:
             n = 2*i + 1
             n_p = n * p
             M = magnetization_coeffs[i]
-
-            # if i == 0:
-            #     numerator = (Rm/Rs)**2 - (Rr/Rs)**2 + (Rr/Rs)**2 * npy.log((Rm/Rr)**2)
-            #     denominator = ((mur+1)/mur)*(1-(Rr/Rs)**2) - ((mur-1)/mur)*((Rm/Rs)**2 - (Rr/Rm)**2)
-            #     flux_coeffs[i] = (self.mu0*M/mur) * numerator / denominator
-            # else:
             factor1 = (self.mu0*M/mur)
             factor2 = n_p/(n_p**2-1)
             factor3 = (r/Rs)**(n_p - 1)*(Rm/Rs)**(n_p+1) + (Rm/r)**(n_p + 1)
@@ -764,128 +887,195 @@ class OpenCircuitField:
         
         return Hr, Ht
     
-    def radial_flux_density_equation_52(self, theta: np.ndarray, 
-                                       n_harmonics: int = 20) -> np.ndarray:
+    def flux_linkage_per_turn(self, radius: float,
+                              n_harmonics: int = 20) -> float:
         """
-        Calculate radial flux density BH(θ) at the stator surface using Zhu's Equation 52.
+        Calculate flux linkage per turn at given radius using Zhu's method.
         
-        Based on Zhu Part 1, Equation (52):
-        BH(θ) = Σ 2 * (μ0*Mn)/(μr) * (n_p)/((n_p)²-1) * (Rs/Rm)^(n_p-1)
-                * {[(n_p-1)*Rm^(2*n_p) + 2*Rs^(n_p+1)*Rm^(n_p-1) - (n_p+1)*Rs^(2*n_p)] / 
-                   [μr+1)/μr * [Rs^(2*n_p) - Rm^(2*n_p)] - (μr-1)/μr * [Rm^(2*n_p) - Rs^(2*n_p)*(Rs/Rm)^(2*n_p)]]}
-                * cos(n_p*θ)
+        Based on Zhu Part 1, Equations (32-34):
+        ψ = ∫_{-αy/2}^{αy/2} B_open-circuit(α, t) * Rs * lef * dα
         
-        This equation provides the radial flux density at the stator inner surface,
-        considering complete boundary conditions and magnet permeability effects.
+        where:
+        - αy is the winding pitch angle
+        - Rs is the stator bore radius
+        - lef is the effective axial length
         
-        Geometry convention (Zhu's notation):
-        - Rs: Stator inner radius (airgap outer boundary) - evaluation point
-        - Rm: Magnet inner radius (rotor back-iron outer radius)
-        - Physical arrangement: Rm < Rr < Rs (rotor < magnet surface < stator)
-        
-        Note: Summation is over n = 1, 3, 5, ... where n_p = n*p (pole-pair harmonic order)
-        
-        Args:
-            theta: Angular positions (rad)
-            n_harmonics: Number of odd harmonics to include (1, 3, 5, ...)
-            
-        Returns:
-            BH: Radial flux density at stator surface (T)
-        """
-        # Initialize output array
-        BH = np.zeros_like(theta)
-        
-        # Motor parameters - use Zhu's convention for Equation 52
-        # In Zhu Eq 52: Rs = stator inner (airgap outer), Rm = magnet inner radius
-        # Physical: rotor_back_iron < Rm < Rr (rotor outer with magnets) < Rs (stator inner)
-        Rs = self.geometry.stator_inner_radius  # Stator inner radius (evaluation surface)
-        # Use clarified attribute for magnet inner radius (Equation 52 uses magnet inner)
-        Rm = self.Rm_in
-        mur = self.magnet.relative_permeability
-        p = self.geometry.pole_pairs
-        
-        # Base magnetization coefficient
-        M_ = 4 * self.magnet.residual_flux_density / (np.pi * self.mu0)
-        alpha_ = np.pi * self.magnet.magnet_arc_ratio / 2
-        
-        # Calculate each harmonic contribution
-        # Summation over n = 1, 3, 5, 7, ... (odd harmonics)
-        for i in range(n_harmonics):
-            n = 2*i + 1  # Harmonic multiplier: 1, 3, 5, 7, ...
-            n_p = n * p  # Pole-pair harmonic order
-            
-            # Calculate magnetization coefficient for this harmonic
-            if np.sin(alpha_ * n) == 0:
-                continue
-                
-            Mn = M_ * np.sin(alpha_ * n) / n
-            
-            if n_p == 1:
-                # Skip n_p=1 case as it causes division by zero in (n_p²-1)
-                continue
-                
-            # Coefficient term: 2 * (μ0*Mn)/μr * n_p/((n_p)²-1) * (Rs/Rm)^(n_p-1)
-            coeff = (2 * self.mu0 * Mn / mur * 
-                    n_p / (n_p**2 - 1) * 
-                    (Rs / Rm)**(n_p - 1))
-            
-            # Numerator of the complex fraction
-            numerator = ((n_p - 1) * Rm**(2*n_p) + 
-                        2 * Rs**(n_p + 1) * Rm**(n_p - 1) - 
-                        (n_p + 1) * Rs**(2*n_p))
-            
-            # Denominator of the complex fraction
-            term1 = ((mur + 1) / mur) * (Rs**(2*n_p) - Rm**(2*n_p))
-            term2 = ((mur - 1) / mur) * (Rm**(2*n_p) - Rs**(2*n_p) * (Rs/Rm)**(2*n_p))
-            denominator = term1 - term2
-            
-            # Check for zero or invalid denominator (numerical stability)
-            # Note: denominator can be very small due to high powers of Rs, Rm < 1
-            # Only skip if exactly zero or would cause overflow
-            if denominator == 0 or not np.isfinite(denominator):
-                continue
-            
-            # Complete harmonic term
-            harmonic_term = coeff * (numerator / denominator) * np.cos(n_p * theta)
-            
-            # Add to total
-            BH += harmonic_term
-        
-        return BH
-    
-    def flux_linkage_per_turn(self, radius: float, n_harmonics: int = 20) -> float:
-        """
-        Calculate flux linkage per turn at given radius.
-        
-        Physical note: Directly integrating Br over a full pole pair cancels to ~0
-        for sinusoidal fields. The useful linkage is the fundamental flux per pole
-        that links a full-pitch turn. We therefore extract the fundamental cosine
-        component of Br at the given radius and compute:
-            Φ_pole = (2/p) * B1(R, fundamental) * R * L
-        where B1 is the amplitude of the fundamental pole-pair harmonic at the
-        stator surface.
+        This integrates the flux density over the coil span to get the total
+        flux linkage, accounting for the distribution factor through the 
+        integration limits.
 
         Args:
-            radius: Radius at which to calculate flux linkage (m)
+            radius: Radius at which to calculate flux linkage (m) - typically stator bore
             n_harmonics: Number of odd harmonics to include in Br synthesis
 
         Returns:
-            Flux linkage per turn (Wb), equal to the fundamental flux per pole
-            that a full-pitch single turn links.
+            Flux linkage per turn (Wb)
         """
-        # Sample Br over 0..2π and project onto the fundamental cos(pθ)
         p = self.geometry.pole_pairs
-        theta = np.linspace(0.0, 2.0*np.pi, 2048, endpoint=False)
-        Br = self.radial_flux_density_in_gap_at_radius(radius, theta, n_harmonics)
-
-        # Fundamental amplitude at this radius using orthogonality:
-        # A1 = (1/π) ∫_0^{2π} Br(θ) cos(pθ) dθ
-        cos_p = np.cos(p * theta)
-        A1 = (1.0/np.pi) * np.trapz(Br * cos_p, theta)
-
-        # Fundamental flux per pole linking a full-pitch turn
-        phi_per_pole = (2.0 / p) * A1 * radius * self.geometry.axial_length
-        return float(phi_per_pole)
+        L_eff = self.geometry.axial_length
+        winding_pitch_angle = npy.pi / p  # Full pitch for concentrated winding
+        
+        # Get flux density coefficients Bn from the analytical solution
+        harmonics, magnetization_coeffs = self.fourier_coefficients(n_harmonics)
+        
+        # Calculate flux density coefficients (same as in radial_flux_density_in_gap_at_radius)
+        Rs = self.Rs
+        Rm = Rs - self.g
+        Rr = Rs - self.g - self.Hm
+        mur = self.magnet.relative_permeability
+        
+        flux_coeffs = npy.zeros(len(magnetization_coeffs))
+        for i in range(len(magnetization_coeffs)):
+            n = 2*i + 1
+            n_p = n * p
+            M = magnetization_coeffs[i]
+            
+            factor1 = (self.mu0 * M / mur)
+            factor2 = n_p / (n_p**2 - 1)
+            factor3 = (radius/Rs)**(n_p - 1) * (Rm/Rs)**(n_p+1) + (Rm/radius)**(n_p + 1)
+            numerator = (n_p - 1) + 2*(Rr/Rm)**(n_p+1) - (n_p + 1)*(Rr/Rm)**(2*n_p)
+            denominator = ((mur+1)/mur)*(1-(Rr/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p)-(Rr/Rm)**(2*n_p))
+            flux_coeffs[i] = factor1 * factor2 * factor3 * numerator / denominator
+        
+        # Zhu Equation (33): ψ = Λo * Σ (Φn/np) * Kdn * cos(np*αma)
+        # where Φn = 2*Bn*Rs*lef*Λo and Kdn = sin(np*αy/2)
+        # For αma = 0 (aligned with magnet center), cos(np*αma) = 1
+        
+        psi = 0.0
+        for i, (n_harmonic, Bn) in enumerate(zip(harmonics, flux_coeffs)):
+            n = 2*i + 1
+            n_p = n * p
+            
+            # Zhu Eq (34): Φn = 2*Bn*Rs*lef*Λo (but Λo = 1 for slotless)
+            Phi_n = 2.0 * Bn * radius * L_eff
+            # Distribution factor: Kdn = sin(np*αy/2)
+            K_dn = npy.sin(n_p * winding_pitch_angle / 2.0)
+            # Zhu Eq (33): contribution from this harmonic
+            psi += (Phi_n / n_p) * K_dn
+        
+        return float(psi)
+    
+    def back_emf_per_turn(self, radius: float, omega_r: float,
+                         n_harmonics: int = 20) -> float:
+        """
+        Calculate back-EMF induced per turn at given radius and speed.
+        
+        Based on Zhu Part 1, Equation (35):
+        e = -dψ/dt = Λo * Σ 2*Bn*Rs*lef*ωr*Kdn * sin(np*αma)
+          = Σ ωr*Φn*Kdn * sin(np*αma)
+        
+        For peak EMF (αma = π/(2np)), sin(np*αma) = 1:
+        e_peak = Σ ωr*Φn*Kdn
+        
+        Args:
+            radius: Radius at which to calculate EMF (m) - typically stator bore
+            omega_r: Rotor mechanical angular velocity (rad/s)
+            n_harmonics: Number of harmonics to include
+            
+        Returns:
+            Peak back-EMF per turn (V)
+        """
+        p = self.geometry.pole_pairs
+        L_eff = self.geometry.axial_length
+        winding_pitch_angle = npy.pi / p  # Full pitch for concentrated winding
+        
+        # Get flux density coefficients
+        harmonics, magnetization_coeffs = self.fourier_coefficients(n_harmonics)
+        
+        # Calculate flux density coefficients (same as in flux_linkage_per_turn)
+        Rs = self.Rs
+        Rm = Rs - self.g
+        Rr = Rs - self.g - self.Hm
+        mur = self.magnet.relative_permeability
+        
+        flux_coeffs = npy.zeros(len(magnetization_coeffs))
+        for i in range(len(magnetization_coeffs)):
+            n = 2*i + 1
+            n_p = n * p
+            M = magnetization_coeffs[i]
+            
+            factor1 = (self.mu0 * M / mur)
+            factor2 = n_p / (n_p**2 - 1)
+            factor3 = (radius/Rs)**(n_p - 1) * (Rm/Rs)**(n_p+1) + (Rm/radius)**(n_p + 1)
+            numerator = (n_p - 1) + 2*(Rr/Rm)**(n_p+1) - (n_p + 1)*(Rr/Rm)**(2*n_p)
+            denominator = ((mur+1)/mur)*(1-(Rr/Rs)**(2*n_p)) - ((mur-1)/mur)*((Rm/Rs)**(2*n_p)-(Rr/Rm)**(2*n_p))
+            flux_coeffs[i] = factor1 * factor2 * factor3 * numerator / denominator
+        
+        # Calculate peak EMF: e = Σ ωr * Φn * Kdn
+        emf = 0.0
+        for i, (n_harmonic, Bn) in enumerate(zip(harmonics, flux_coeffs)):
+            n = 2*i + 1
+            n_p = n * p
+            
+            # Zhu Eq (34): Φn = 2*Bn*Rs*lef (Λo = 1 for slotless)
+            Phi_n = 2.0 * Bn * radius * L_eff
+            # Distribution factor: Kdn = sin(np*αy/2)
+            K_dn = npy.sin(n_p * winding_pitch_angle / 2.0)
+            # Zhu Eq (35): e = ωr * Φn * Kdn
+            emf += omega_r * Phi_n * K_dn
+        
+        return float(emf)
+    
+    def back_emf_rms_per_phase(self, radius: float, omega_r: float,
+                               winding: 'WindingConfiguration',
+                               n_harmonics: int = 20) -> float:
+        """
+        Calculate RMS back-EMF per phase.
+        
+        For a winding with N_s turns in series per phase:
+        E_rms = (1/√2) * e_peak * N_s
+        
+        where e_peak is the peak EMF per turn from back_emf_per_turn().
+        
+        Args:
+            radius: Radius at which to calculate EMF (m) - typically stator bore
+            omega_r: Rotor mechanical angular velocity (rad/s)
+            winding: WindingConfiguration object
+            n_harmonics: Number of harmonics to include
+            
+        Returns:
+            RMS back-EMF per phase (V)
+        """
+        # Peak EMF per turn
+        e_peak_per_turn = self.back_emf_per_turn(radius, omega_r, n_harmonics)
+        
+        # Total turns per phase = turns_per_coil (series connection assumed)
+        N_series = winding.turns_per_coil
+        
+        # Peak EMF per phase
+        e_peak_phase = e_peak_per_turn * N_series
+        
+        # RMS value
+        e_rms_phase = e_peak_phase / npy.sqrt(2.0)
+        
+        return float(e_rms_phase)
+    
+    def emf_constant(self, radius: float, winding: 'WindingConfiguration',
+                    n_harmonics: int = 20) -> float:
+        """
+        Calculate EMF constant (back-EMF per unit speed).
+        
+        Ke = E_rms / ω_r  [V/(rad/s)] or [V·s/rad]
+        
+        This is the voltage constant relating EMF to mechanical speed.
+        Related to torque constant by: Ke = Kt (in SI units).
+        
+        Args:
+            radius: Radius at which to calculate (m) - typically stator bore
+            winding: WindingConfiguration object
+            n_harmonics: Number of harmonics to include
+            
+        Returns:
+            EMF constant Ke (V·s/rad)
+        """
+        # Calculate at 1 rad/s and scale
+        omega_test = 1.0  # rad/s
+        e_rms = self.back_emf_rms_per_phase(radius, omega_test, winding, n_harmonics)
+        
+        # Ke = E_rms / ω
+        Ke = e_rms / omega_test
+        
+        return float(Ke)
     
     def plot_flux_density_distribution(self, radius: Optional[float] = None,
                                      n_harmonics: int = 20, figsize: Tuple[int, int] = (12, 8)):
